@@ -1,0 +1,143 @@
+A workflow to identify highly connected and differentially expressed subnetworks
+========================================================
+**Author:** Kanthida Kusonmano  
+**Last update:** May 2016
+
+**Steps:**  
+1. Data preparation  
+2. Subnetworks detection  
+3. Screening for differentially expressed subnetworks  
+4. Exporting the identified subnetworks for visualization
+ 
+1. Data preparation
+-------------------------------------------------------
+
+#### Load functions
+First, load all defined functions for running our method.
+```{r eval=FALSE}
+source("functions.R")   # Load functions
+```
+
+#### Load workspace
+Load workspace to prepare variables for the analysis. (User can load their own data from your their files.)  
+1. Expression data: here is *cur_exp*. The variable is a dataframe of expression data of samples (objects) in one condition. Each sample has each its own expression data of all genes (variables). The number of genes here was reduced according to maapping with genes/proteins that have PPI data.  
+2. PPI matrix: here is *matrix_pp_intr*. This is an n*x*n interaction matrix, where n is a number of all genes. 1 represent interaction between the a gene pair, otherwise 0.  
+3. Fold change data: here is *fc*. This is a dataframe containing information of fold changes of all genes. It will be used for adding node attributes when exporting the resulting subnetworks.  
+```{r eval=FALSE}
+load("DiffNet.RData")   # Load workspace
+```
+  
+2. Subnetworks detection
+-------------------------------------------------------
+  
+#### Load WGCNA package 
+```{r eval=FALSE}
+library(WGCNA)
+options(stringsAsFactors = FALSE)
+allowWGCNAThreads()
+```
+  
+#### Pick soft threshold (power) for the integrated networks between PPIs and expression gene-gene correlations 
+*Please note that the example code here demonstrate only for one condition (e.g. metastatic samples). Please repeat the process for another condition*
+```{r eval=FALSE}
+pickSoftThresholdAndPlotWithDefinedEdges(cur_exp, matrix_pp_intr, nBreaks=8)
+```
+   
+#### Define power 
+Determine the soft threshold 
+```{r eval=FALSE}
+pow = 6 
+```
+  
+#### Create adjacency matrix
+The adjacency matrix is the combination of both expression correlation and PPI. 
+```{r eval=FALSE}
+adjac = adjacency(cur_exp, power=pow)
+adjac = adjac * data.matrix(matrix_pp_intr)
+```
+
+#### Calculate topology overlap measure (TOM)
+```{r eval=FALSE}
+TOM = TOMsimilarity(adjac)    # Turn adjacency into topological overlap
+dissTOM = 1-TOM
+```
+
+#### Clustering and TOM plot
+Perform the hierarchical clustering
+```{r eval=FALSE}
+geneTree = flashClust(as.dist(dissTOM), method="average")
+```
+
+Identify modules using dynamic tree cut
+```{r eval=FALSE}
+minModuleSize = 10	  # Set the minimum module size
+moduleLabels = cutreeDynamic(dendro=geneTree, distM=dissTOM, deepSplit=2, pamRespectsDendro=FALSE, minClusterSize=minModuleSize)
+```
+
+Label the seperated modules with colors and plot the dendrogram
+```{r eval=FALSE}
+moduleColors = labels2colors(moduleLabels)
+sizeGrWindow(8,6)
+plotDendroAndColors(geneTree, moduleColors, "Dynamic Tree Cut", dendroLabels = FALSE, hang = 0.03, addGuide = TRUE, guideHang = 0.05, main = "Gene dendrogram and module colors")
+```
+
+TOM plot
+```{r eval=FALSE}
+hasColor = which(moduleColors != "grey") 
+length(hasColor)
+colorTOM = dissTOM[hasColor, hasColor]
+colorTree = flashClust(as.dist(colorTOM), method="average")
+colorDiss = colorTOM^500
+diag(colorDiss) = NA
+sizeGrWindow(9,9)
+TOMplot(colorDiss, colorTree, moduleColors[hasColor], main="Network heatmap plot, color genes")
+```
+
+#### Export subnetworks for GSEA
+Export the identified modules/subnetworks to identify differentially expressed subnetwork by using GSEA
+```{r eval=FALSE}
+writeNetworkModulesToGMT(names(cur_exp), "genesets.gmt", moduleColors)
+```
+
+
+3. Screening for differentially expressed subnetworks
+-------------------------------------------------------
+
+Perform GSEA to identify differentially expressed subnetworks. Treat the identified subnetworks (from integration between expression correlation and PPI) as input gene sets.  
+
+#### Run GSEA
+Run GSEA through Java command line
+```{r eval=FALSE}
+system("java -cp gsea2-2.0.13.jar -Xmx1024m xtools.gsea.GseaPreranked -gmx genesets.gmt -rnk sam_res.rnk -collapse false -set_max 500 -set_min 10 -out gsea_res -plot_top_x 50")
+```
+
+#### Identify significant differentially expressed subnetworks
+Read GSEA results and select significant differentially expressed subnetworks using cut-off FDR (default is 0.05)  
+*Please note that the example code here demonstrate only for one enrichment (neg). Please repeat the process for another enrichment*
+```{r eval=FALSE}
+gsea_output_file = "gsea_res/my_analysis.GseaPreranked.1415887590639/gsea_report_for_na_neg_1415887590639.xls"   # GSEA result file
+gsea_result = read.csv(gsea_output_file, header=TRUE, sep='\t')
+sigModules = tolower(gsea_result$NAME[which(gsea_result$FDR.q.val < 0.05 & gsea_result$NAME != "GREY")])
+```
+
+
+4. Exporting the identified subnetworks for visualization 
+-------------------------------------------------------
+
+Export the highly connected and differentially expressed subnetworks for visualisation in Cytoscape  
+*Please note that other node attributes can be added/removed as desired.*
+```{r eval=FALSE}
+exportModulesToCytoscapeWithTOM(sigModules, TOM, names(cur_exp), moduleColors, "subnetworks_intrs_neg") # Export interactions
+createNodeAttributesForCytoscape("subnetworks_nodes_neg.txt", sigModules, fc, "gsea_res/my_analysis.GseaPreranked.1415887590639", "neg")  # Export nodes with their attributes
+```
+
+Merge interaction files (Each subnetworks has it own file)
+```{r eval=FALSE}
+system("ls subnetworks_intrs_*.txt | xargs -n 1 tail -n +2 > allsubnetworks_intrs.txt")
+```
+
+Merge node attribute files
+```{r eval=FALSE}
+system(paste("head -1 subnetwork_nodes_*.txt | tail -1 > allsubnetworks_nodes.txt", sep=""))
+system(paste("ls subnetworks_nodes_*.txt | xargs -n 1 tail -n +2 >> allsubnetworks_nodes.txt", sep=""))
+```

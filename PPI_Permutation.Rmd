@@ -1,0 +1,181 @@
+PPI permutation test of the identified highly connected and differentially expressed subnetworks
+========================================================
+
+**Author:** Kanthida Kusonmano  
+**Last update:** August 2016
+
+**Steps:**  
+1. Data preparation  
+2. PPI permutation test  
+3. Permutation score calculation
+  
+  
+1. Data preparation
+-------------------------------------------------------
+
+#### Load functions
+First, load all defined functions for running our method.
+```{r eval=FALSE}
+source("functions.R")   # Load functions
+```
+
+#### Load workspace
+Load workspace to prepare variables for the analysis. (User can load their own data from their own files.)  
+1. Expression data: here is *exp_perm*. This is a dataframe of expression data of samples (objects) in both conditions. Each sample has each its own expression data of all genes (variables). The number of genes here was reduced according to mapping with genes/proteins that have PPI data.  
+2. Class variable: here is *cls*. This variable is a vector telling class/condition of the expression data. 1 is primary tumor and 2 is metastasis.  
+3. PPI data: here is *intr_pp*. This is a dataframe of protein-protein interaction (PPI) data, containing pairs of PPI.  
+```{r eval=FALSE}
+load("DiffNet_PPiPerm.RData")   # Load workspace
+```
+
+#### Load required packages, WGCNA and permute 
+```{r eval=FALSE}
+library(WGCNA)
+options(stringsAsFactors = FALSE)
+allowWGCNAThreads()
+library(permute)
+```
+
+2. PPI permutation test
+-------------------------------------------------------
+
+#### Prepare variables for permutation test
+```{r eval=FALSE}
+control = how() # For permute function
+num_perm = 500  # Number of permutation (default is 500)
+pnames = names(exp_perm) # Gene names
+num_genes_ppi = length(exp_perm) # Number of genes that are in both expression and PPI (Permutation will be within these genes)
+```
+
+#### Prepare for collecting results from permutation test
+Define vectors to collect NES (Normalized Enrichment Scores from GSEA) of subnetworks from each permutated data
+```{r eval=FALSE}
+all_ecpt_neg = c()  # For PTPT: Subnetworks having primary tumor gene-gene correlctions and enriched in primary tumor samples
+all_ecpt_pos = c()  # For PTME: Subnetworks having primary tumor gene-gene correlctions and enriched in metastasis samples
+all_ecm_neg = c()   # For MEPT: Subnetworks having metastases gene-gene correlctions and enriched in primary tumor samples
+all_ecm_pos = c()   # For MEME: Subnetworks having metastases gene-gene correlctions and enriched in metastasis samples
+```
+
+Create a log file to record permutations
+```{r eval=FALSE}
+f_res = file(paste(results_path, 'permutation_results_log_ppi.txt', sep="/"), "wt")
+```
+
+#### Loop for each permutation 
+Each loop has the following step:  
+2.1 Creating shuffled PPI matrix  
+2.2 Subnetwork detection  
+2.3 Screening for differentially expressed subnetworks  
+
+```{r eval=FALSE}
+for (i_perm in seq(num_perm)){
+  
+  # 2.1 Creating shuffled PPI matrix (using a shuffled gene/protein list; once the genes are shuffled the interactions are shuffled too)
+  
+  # Permutate a gene list
+  cur_perm = permute(i_perm, num_genes_ppi, control)
+  snames = pnames[cur_perm]
+  
+  # Define shuffled PPI matrix
+  matrix_pp_intr = array(rep(0, times=num_genes_ppi*num_genes_ppi), dim=c(num_genes_ppi, num_genes_ppi))
+  for (ipp in 1:nrow(intr_pp)){
+    iA = which(pnames==intr_pp[, 2][ipp]) 
+    iB = which(pnames==intr_pp[, 4][ipp]) 
+    if (length(iA) > 0 & length(iB) > 0){
+      iA = which(pnames==snames[iA])
+      iB = which(pnames==snames[iB])
+      matrix_pp_intr[iA, iB] = 1
+      matrix_pp_intr[iB, iA] = 1
+    }
+  }
+  diag(matrix_pp_intr) = 1
+  
+  
+  # 2.2 Subnetworks detection
+  
+  # For each sample group (here is primary tumor and metastasis)
+  for (net_name in c('ecm', 'ecpt')){
+    
+    # Get expression of current sample group and define the powers (as used in original data)
+    if (net_name == 'ecm'){
+      cur_exp = exp_perm[cls==2, ]  # metastasis samples
+      pow = 4
+    } else{
+      cur_exp = exp_perm[cls==1, ]  # primary tumor samples
+      pow = 6
+    }
+
+    # Set up result directory
+    gsea_output_folder = paste(net_name, "perm", i_perm, "ppi", sep="_")
+    system(paste("mkdir", gsea_output_folder, sep=" "))  # Output folder
+    gsea_geneset_file = paste(gsea_output_folder, "/net_", net_name, ".gmt", sep="") 
+    
+    # Create adjacency matrix of integrated expression correlation and PPI 
+    adjac = adjacency(cur_exp, power=pow)
+    adjac = adjac * data.matrix(matrix_pp_intr) 
+    
+    # Turn adjacency into topological overlap
+    TOM = TOMsimilarity(adjac);
+    dissTOM = 1-TOM
+    
+    # Clustering
+    geneTree = flashClust(as.dist(dissTOM), method="average")    
+    minModuleSize = 10	# Set the minimum module size
+    moduleLabels = cutreeDynamic(dendro=geneTree, distM=dissTOM, deepSplit=2, pamRespectsDendro=FALSE, minClusterSize=minModuleSize)
+    moduleColors = labels2colors(moduleLabels)
+    
+    # Export modules for GSEA
+    writeNetworkModulesToGMT(names(cur_exp), gsea_geneset_file, moduleColors)
+    
+    
+    # 2.3 Scereening for differentially expressed subnetworks
+    
+    # Run GSEA
+    #sam_res.rnk*******
+    system(paste("java -cp gsea2-2.0.13.jar -Xmx1024m xtools.gsea.GseaPreranked -gmx", gsea_geneset_file, "-rnk sam_res.rnk -collapse false -set_max 500 -set_min 10 -out", gsea_output_folder, "-plot_top_x 50", sep=" "))
+    
+    # Read GSEA results 
+    for (gsea_output_enriched in c("pos", "neg")){ # 'neg' = enriched in primary tumor samples, 'pos' = enriched in metastasis samples
+      # Read GSEA results
+      rand_num = unlist(strsplit(as.character(list.dirs(gsea_output_folder, recursive=FALSE)), split=".", fixed=TRUE))[suppressWarnings(!is.na(as.numeric(unlist(strsplit(as.character(list.dirs(gsea_output_folder, recursive=FALSE)), split=".", fixed=TRUE)))))]  # Get random number of file name of GSEA result
+      result_folder = list.dirs(gsea_output_folder, recursive=FALSE)[grep("my_analysis", list.dirs(gsea_output_folder, recursive=FALSE))] 
+      gsea_result = read.csv(paste(result_folder, "/", "gsea_report_for_na_", gsea_output_enriched, "_", rand_num, ".xls", sep=""), header=TRUE, sep='\t')  # Read GSEA report
+      # Keep all NES values, and discard the 'grey' color which means a group of genes belonging to no module
+      if (net_name == 'ecm'){
+        if (gsea_output_enriched == "pos"){
+          all_ecm_pos = c(all_ecm_pos, gsea_result$NES[which(gsea_result$NAME != "GREY")])
+          writeLines(paste("ecm pos", all_ecm_pos, sep="\t"), f_res)
+        }else{
+          all_ecm_neg = c(all_ecm_neg, gsea_result$NES[which(gsea_result$NAME != "GREY")])
+          writeLines(paste("ecm neg", all_ecm_neg, sep="\t"), f_res)
+        }
+      }else{
+        if (gsea_output_enriched == "pos"){
+          all_ecpt_pos = c(all_ecpt_pos, gsea_result$NES[which(gsea_result$NAME != "GREY")])
+          writeLines(paste("ecpt pos", all_ecpt_pos, sep="\t"), f_res)
+        }else{
+          all_ecpt_neg = c(all_ecpt_neg, gsea_result$NES[which(gsea_result$NAME != "GREY")])
+          writeLines(paste("ecpt neg", all_ecpt_neg, sep="\t"), f_res)
+        }
+      }
+    } # End enriched group (pos, neg)    
+    
+  } # End net_name loop (ecm, ecpt)  
+} # End permutation loop
+
+close(f_res)
+```
+
+3. Permutation score calculation
+-------------------------------------------------------
+Calculate significant score (p-value) of the detected subnetworks based on permutated subnetworks using NES (calculate for each type of subnetworks).  
+Inputs are:  
+1) the GSEA result path of the original identified subnetworks  
+2) the permutation result file name.
+
+```{r eval=FALSE}
+getPermutationPvalue(all_ecm_pos, "gsea_res/my_analysis.GseaPreranked.1415887590639/gsea_report_for_na_pos_1415713758030.xls", "permutation_results_ecm_pos.txt")
+getPermutationPvalue(all_ecm_neg, "gsea_res/my_analysis.GseaPreranked.1415887590639/gsea_report_for_na_neg_1415713758030.xls", "permutation_results_ecm_neg.txt")
+getPermutationPvalue(all_ecpt_pos, "gsea_res/my_analysis.GseaPreranked.1415887590639/gsea_report_for_na_pos_1415714322326.xls", "permutation_results_ecpt_pos.txt")
+getPermutationPvalue(all_ecpt_neg, "gsea_res/my_analysis.GseaPreranked.1415887590639/gsea_report_for_na_pos_1415714322326.xls", "permutation_results_ecpt_neg.txt")
+```
